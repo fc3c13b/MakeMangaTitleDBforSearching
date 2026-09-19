@@ -11,6 +11,8 @@
 - [x] group_titles.py を新規作成 (Step 2)
 - [x] export_results.py を新規作成 (Step 4)
 - [x] add_new_titles.py を新規作成 (Step 5)
+- [x] fetch_readings.py を縮小 (Step 3 - API取得・DB保存のみ)
+- [x] run_pipeline.py を5ステップオーケストレーターに更新
 
 ---
 
@@ -26,10 +28,3 @@
 
 ### 3. `add_new_titles.py` を新規作成
 - 新規タイトルを既存 `cleaned_titles.json` に重複チェックして追加する機能
-
-### 4. `fetch_readings.py` を縮小
-- グルーピング処理とエクスポート処理を削除
-- 純粋なAPI呼び出し・DB保存のみを残す
-
-### 5. `run_pipeline.py` を更新
-- 旧3ステップ（Media Arts DB参照）→ 新5ステップ構成に更新
