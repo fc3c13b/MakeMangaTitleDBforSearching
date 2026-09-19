@@ -10,6 +10,7 @@
 - [x] README.md を5ステップ構成に更新
 - [x] group_titles.py を新規作成 (Step 2)
 - [x] export_results.py を新規作成 (Step 4)
+- [x] add_new_titles.py を新規作成 (Step 5)
 
 ---
 
