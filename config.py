@@ -10,7 +10,7 @@ CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 # デフォルト値
 DEFAULTS = {
     "quality_threshold": 0.7,
-    "llm_model": "gemini-1.5-flash",
+    "llm_model": "gemini-flash-lite-latest",
     "max_batch_size": 500,
     "db_path": "manga_titles.db",
 }
@@ -19,7 +19,7 @@ DEFAULTS = {
 def load_config() -> dict:
     """設定ファイルを読み込む（存在しない場合はデフォルト値）"""
     if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+        with open(CONFIG_PATH, 'r', encoding='utf-8-sig') as f:
             user_config = json.load(f)
         DEFAULTS.update(user_config)
     return dict(DEFAULTS)
