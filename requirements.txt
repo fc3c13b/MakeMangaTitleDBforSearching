@@ -1,4 +1,4 @@
-# FindMangaTitle - 漫画タイトル抽出ツール
+# MakeMangaTitleDBforSearching - 漫画タイトル抽出ツール
 # 依存パッケージ
 
 # データ処理

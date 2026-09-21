@@ -1,0 +1,250 @@
+"""
+fetch_readings.py - dl_raw_titles.txtのタイトルに対してAI APIで読み方（ふりがな）を取得
+"""
+import csv
+import json
+import os
+import time
+import sqlite3
+import sys
+import argparse
+from config import load_config, get_db_path
+from google import genai
+
+# APIレート制限マージンを含む待機時間（秒）
+# DELAY=10秒 → RPM消費率40%（15回/分のうち6回/分）
+DELAY = 10.0
+# 入力文字数の制限（出力トークン80%制限を満たすよう計算）
+# 推定: 80%×8192=6554トークン → 180タイトル/バッチ × 平均20字 = 3600字
+MAX_INPUT_CHARS = 3600
+TITLES_PER_BATCH_MAX = 180
+
+
+def load_config():
+    """設定を読み込む"""
+    config_path = os.path.join(os.path.dirname(__file__), "config.json")
+    try:
+        with open(config_path, 'r', encoding='utf-8-sig') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def add_reading_column(db_path: str):
+    """reading カラムを folder_titles に追加"""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # reading カラムが存在しない場合に追加
+    cursor.execute("PRAGMA table_info(folder_titles)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if "reading" not in columns:
+        cursor.execute("ALTER TABLE folder_titles ADD COLUMN reading TEXT DEFAULT ''")
+        conn.commit()
+        print("reading カラムを追加しました")
+    
+    conn.close()
+
+
+def get_titles_from_file():
+    """dl_raw_titles.txtからタイトルをリストとして取得"""
+    file_path = os.path.join(os.path.dirname(__file__), "dl_raw_titles.txt")
+    with open(file_path, 'r', encoding='utf-8') as f:
+        titles = [line.strip() for line in f.readlines() if line.strip()]
+    return titles
+
+
+def split_titles_by_char_limit(titles: list, max_chars: int, max_count: int) -> list:
+    """文字数管理でバッチを分割"""
+    batches = []
+    current_batch = []
+    current_chars = 0
+    
+    for title in titles:
+        # 2つの条件で制限：
+        # 1. タイトル数の上限（出力トークン制御）
+        # 2. 文字数上限（入力トークン制御）
+        if len(current_batch) >= max_count or current_chars + len(title) > max_chars:
+            if current_batch:
+                batches.append(current_batch)
+            current_batch = []
+            current_chars = 0
+        
+        current_batch.append(title)
+        current_chars += len(title)
+    
+    if current_batch:
+        batches.append(current_batch)
+    
+    return batches
+
+
+def fetch_readings_batch(client, model, titles: list, group_id: int) -> dict:
+    """AI APIを使用して複数のタイトルに対して読み方を取得"""
+    titles_text = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
+    
+    prompt = f"""You are a Japanese reading assistant. For each manga title listed below, provide the hiragana reading (ふりがな).
+
+RULES:
+1. Return readings for ALL titles listed - do not skip any
+2. Use ONLY hiragana (平仮名) for readings
+3. If uncertain or ambiguous, use "unknown" as the reading
+4. Return valid JSON only - no extra text
+
+SPECIAL CONSIDERATIONS:
+- Some titles may contain romanized text (e.g. "shinwa", "tatsujin"). Treat them as Japanese words and provide the standard Japanese reading.
+- Some titles may include author names, volume numbers, language tags, or decorative symbols (like #, &, ~, etc.). Focus ONLY on the actual manga title and provide its Japanese reading.
+- Even if the title appears in English, provide the reading as if it were the Japanese title used in Japan.
+
+TITLES:
+{titles_text}
+
+OUTPUT FORMAT (flat structure - do NOT use nested arrays):
+{{"group_id": {group_id}, "readings": {{"title1": "reading1", "title2": "reading2", ...}}}}"""
+    
+    try:
+        response = client.models.generate_content(model=model, contents=prompt)
+        text = response.text
+        
+        # JSONを抽出
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0]
+        elif "```" in text:
+            text = text.split("```")[1]
+        
+        result = json.loads(text)
+        # グループIDと読み方の辞書構造に対応: {"group_id": N, "readings": {"title": "reading", ...}}
+        if "readings" in result:
+            return {"group_id": result.get("group_id", group_id), "readings": result["readings"]}
+        return {"group_id": group_id, "readings": {item["title"]: item["reading"] for item in result.get("titles", [])}}
+    
+    except Exception as e:
+        print(f"APIエラー: {e}")
+        return {"group_id": group_id, "readings": {}}
+
+
+def main():
+    config = load_config()
+    api_key = config.get("gemini_api_key", "")
+    model = config.get("llm_model", "gemini-flash-lite-latest")
+    
+    if not api_key:
+        print("ERROR: APIキーが見つかりません。config.jsonに'gemini_api_key'を設定してください。")
+        return
+    
+    db_path = get_db_path()
+    print(f"DBパス: {db_path}")
+    print(f"モデル: {model}")
+    
+    # 評価用ファイルの初期化（追記モードで、初回だけヘッダー/クリア）
+    csv_path = os.path.join(os.path.dirname(__file__), "successful_readings.csv")
+    failed_path = os.path.join(os.path.dirname(__file__), "failed_titles.txt")
+    
+    # successful_readings.csv が存在しない場合はヘッダー作成
+    if not os.path.exists(csv_path):
+        with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
+            writer = csv.writer(f)
+            writer.writerow(["folder_name", "reading", "source", "confidence"])
+    
+    # failed_titles.txt は初回だけ空で初期化
+    if not os.path.exists(failed_path):
+        with open(failed_path, 'w', newline='', encoding='utf-8-sig') as f:
+            pass
+    
+    # reading カラムの追加
+    add_reading_column(db_path)
+    
+    # タイトル一覧を取得
+    titles = get_titles_from_file()
+    print(f"処理対象タイトル数: {len(titles)}")
+    print()
+    
+    # チェックポイントの読み込み
+    checkpoint_path = os.path.join(os.path.dirname(__file__), "checkpoint.json")
+    if os.path.exists(checkpoint_path):
+        with open(checkpoint_path, 'r', encoding='utf-8') as f:
+            cp = json.load(f)
+        processed_set = set(cp.get("processed", []))
+        # すでに処理済みのタイトルをフィルタ
+        remaining = [t for t in titles if t not in processed_set]
+        skipped = len(titles) - len(remaining)
+        print(f"チェックポイントから読み込み済み: {len(processed_set)}件")
+        print(f"スキップ: {skipped}件")
+        print(f"未処理: {len(remaining)}件")
+    else:
+        remaining = titles
+        processed_set = set()
+    
+    if not remaining:
+        print("すべてのタイトルがすでに処理済みです。")
+        return
+    
+    # Gemini APIクライアント
+    client = genai.Client(api_key=api_key)
+    
+    # 文字数管理でバッチを分割
+    batches = split_titles_by_char_limit(remaining, MAX_INPUT_CHARS, TITLES_PER_BATCH_MAX)
+    total_batches = len(batches)
+    success_count = 0
+    fail_count = 0
+    
+    for batch_idx, batch in enumerate(batches):
+        group_id = batch_idx + 1
+        
+        print(f"\n--- グループ {group_id}/{total_batches} ({len(batch)}件, {sum(len(t) for t in batch)}文字) ---")
+        
+        result = fetch_readings_batch(client, model, batch, group_id)
+        readings = result.get("readings", {})
+        
+        # DBに保存
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        for title in batch:
+            if title in readings:
+                cursor.execute(
+                    "UPDATE folder_titles SET reading = ? WHERE folder_name = ? COLLATE NOCASE",
+                    (readings[title], title)
+                )
+                if cursor.rowcount == 0:
+                    # folder_titles に存在しない場合は新規追加
+                    cursor.execute(
+                        "INSERT INTO folder_titles (folder_name, correct_title, reading, confidence, source) "
+                        "VALUES (?, ?, ?, 1.0, 'llm_reading')",
+                        (title, title, readings[title])
+                    )
+                success_count += 1
+                processed_set.add(title)
+                # ✅ 成功をCSVに追記
+                with open(csv_path, 'a', newline='', encoding='utf-8-sig') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([title, readings[title], 'llm_reading', 1.0])
+            else:
+                fail_count += 1
+                print(f"  読み方取得失敗: {title}")
+                # ❌ 失敗をtxtに追記
+                with open(failed_path, 'a', newline='', encoding='utf-8-sig') as f:
+                    f.write(f"{title}\n")
+        
+        conn.commit()
+        conn.close()
+        
+        print(f"  成功: {success_count}件, 失敗: {fail_count}件")
+        
+        # チェックポイントを保存
+        with open(checkpoint_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "processed": list(processed_set),
+                "total": len(titles),
+                "last_group_id": group_id,
+                "timestamp": time.time()
+            }, f, ensure_ascii=False, indent=2)
+        
+        time.sleep(DELAY)
+    
+    print(f"\n=== 処理完了 ===")
+    print(f"成功: {success_count}件, 失敗: {fail_count}件")
+
+
+if __name__ == "__main__":
+    main()

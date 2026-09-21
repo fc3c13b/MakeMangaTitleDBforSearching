@@ -1,4 +1,4 @@
-# Docker Compose - FindMangaTitle API
+# Docker Compose - MakeMangaTitleDBforSearching API
 services:
   findmangatitle:
     image: ghcr.io/${GITHUB_REPOSITORY}:${TAG:-latest}

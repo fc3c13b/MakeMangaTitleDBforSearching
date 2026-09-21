@@ -1,4 +1,4 @@
-# FindMangaTitle — 漫画タイトル自動識別ツール
+# MakeMangaTitleDBforSearching — 漫画タイトル自動識別ツール
 
 [Gemini AI API](https://ai.google.dev/gemini-api) を使って、ダウンロードした漫画のフォルダ名（生タイトル）の読み方（ふりがな）を自動取得し、SQLiteにDB化するバッチ処理パイプラインです。
 

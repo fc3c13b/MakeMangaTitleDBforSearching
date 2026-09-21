@@ -74,7 +74,7 @@
 ## 6. ファイル構成
 
 ```
-FindMangaTitle/
+MakeMangaTitleDBforSearching/
 ├── validate_readings.py    # 新規作成予定（L1+L2検証）
 ├── ground_truth.json       # 新規作成予定（正解データ）
 ├── new_test_titles.txt     # 新規作成予定（テスト用新規タイトル）

@@ -14,7 +14,7 @@ from pipeline import extract_titles
 load_dotenv()
 
 app = FastAPI(
-    title="FindMangaTitle API",
+    title="MakeMangaTitleDBforSearching API",
     description="フォルダ名から漫画タイトルを抽出するAPI",
     version=open("VERSION").read().strip(),
 )
